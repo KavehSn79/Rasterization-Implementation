@@ -6,9 +6,8 @@ This project is primarily focused on demonstrating the core algorithms responsib
 
 ## **✨ Demonstration**
 
-To observe the effect of the manual rasterization algorithms, Z-Buffering, and culling techniques in real-time, paste a GIF or video link of the output here.
+<img width="1081" height="613" alt="Screenshot 2025-10-10 165714" src="https://github.com/user-attachments/assets/498aa4b1-28a7-44c4-9820-2532fa6f4432" />
 
-\<\!-- Replace the placeholder below with your actual GIF or video link once you have captured the output\! \--\>
 
 ## **🚀 Prerequisites**
 
