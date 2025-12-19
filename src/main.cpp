@@ -1,4 +1,4 @@
-﻿#include <iostream>
+#include <iostream>
 #include <span>
 #include <vector>
 
@@ -10,6 +10,7 @@
 
 #include "imgui.h"
 
+#include <algorithm>
 #include <cgtub/camera_controller_turntable.hpp>
 #include <cgtub/camera_perspective.hpp>
 #include <cgtub/canvas.hpp>
@@ -19,8 +20,7 @@
 #include <cgtub/image.hpp>
 #include <cgtub/image_renderer.hpp>
 #include <cgtub/primitives.hpp>
-#include <algorithm> // std::min, std::max
-#include <cmath>     // std::floor, std::ceil, std::fabs
+#include <cmath>
 
 #include "helper.hpp"
 
@@ -31,7 +31,8 @@ void rasterize_lines(
     int                        height,
     std::vector<glm::vec3>*    image,
     std::vector<float>&        zbuffer,
-    bool                       use_zbuffer) // toggle z-buffer
+    bool                       use_zbuffer,
+    bool                       cull_behind_camera) // toggle z-buffer
 {
     auto ndc_to_screen = [&](glm::vec4 const& p)
     {
@@ -46,6 +47,10 @@ void rasterize_lines(
         glm::vec4 p0_ndc = points[i];
         glm::vec4 p1_ndc = points[i + 1];
         glm::vec3 color  = colors[i / 2];
+
+        // Cull behind camera
+        if (cull_behind_camera && (p0_ndc.w < 0 || p1_ndc.w < 0))
+            continue;
 
         glm::vec2 p0 = ndc_to_screen(p0_ndc);
         glm::vec2 p1 = ndc_to_screen(p1_ndc);
@@ -143,29 +148,27 @@ void rasterize_mesh(
         glm::vec4 p1_ndc = positions[tri.y];
         glm::vec4 p2_ndc = positions[tri.z];
 
-        // --- Cull behind camera
+        // Cull behind camera
         if (cull_behind_camera)
         {
             if (p0_ndc.w < 0 || p1_ndc.w < 0 || p2_ndc.w < 0)
                 continue; // skip triangle
         }
 
-        // --- Frontface culling
-        if (cull_front_faces)
-        {
-            glm::vec3 v0_cam = glm::vec3(p1_ndc - p0_ndc);
-            glm::vec3 v1_cam = glm::vec3(p2_ndc - p0_ndc);
-            glm::vec3 normal = glm::normalize(glm::cross(v0_cam, v1_cam));
-
-            if (normal.z > 0) // normal faces camera
-                continue;     // skip triangle
-        }
-
-        glm::vec3 tri_color = use_random_triangle_colors ? ex3::get_random_color(i) : color;
-
         glm::vec2 p0 = ndc_to_screen(p0_ndc);
         glm::vec2 p1 = ndc_to_screen(p1_ndc);
         glm::vec2 p2 = ndc_to_screen(p2_ndc);
+
+        //  Frontface culling
+        if (cull_front_faces)
+        {
+           
+            float winding = (p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y);
+            if (winding > 0)
+                continue;
+        }
+
+        glm::vec3 tri_color = use_random_triangle_colors ? ex3::get_random_color(i) : color;
 
         int xmin = std::max(0, (int)std::floor(std::min({p0.x, p1.x, p2.x})));
         int xmax = std::min(width - 1, (int)std::ceil(std::max({p0.x, p1.x, p2.x})));
@@ -184,22 +187,27 @@ void rasterize_mesh(
             {
                 glm::vec2 v2 = glm::vec2(x + 0.5f, y + 0.5f) - p0;
 
-                float alpha = (v2.x * v1.y - v1.x * v2.y) / denom;
-                float beta  = (v0.x * v2.y - v2.x * v0.y) / denom;
-                float gamma = 1.0f - alpha - beta;
+                float w1 = (v2.x * v1.y - v1.x * v2.y) / denom; // weight for p1
+                float w2 = (v0.x * v2.y - v2.x * v0.y) / denom; // weight for p2
+                float w0 = 1.0f - w1 - w2;                      // weight for p0
 
-                if (alpha >= 0 && beta >= 0 && gamma >= 0)
+                if (w0 >= 0 && w1 >= 0 && w2 >= 0)
                 {
-                    float z = alpha * (p0_ndc.z / p0_ndc.w) +
-                              beta * (p1_ndc.z / p1_ndc.w) +
-                              gamma * (p2_ndc.z / p2_ndc.w);
-
-                    int idx = y * width + x;
+                    float z = w0 * (p0_ndc.z / p0_ndc.w) +
+                              w1 * (p1_ndc.z / p1_ndc.w) +
+                              w2 * (p2_ndc.z / p2_ndc.w);
 
                     if (z < -1.0f || z > 1.0f)
                         continue; // outside frustum
 
-                    if (!use_zbuffer || z < zbuffer[idx])
+                    int idx = y * width + x;
+
+                    if (!use_zbuffer)
+                    {
+                        if (!show_zbuffer)
+                            (*image)[idx] = tri_color;
+                    }
+                    else if (z < zbuffer[idx])
                     {
                         zbuffer[idx] = z;
                         if (!show_zbuffer)
@@ -210,7 +218,7 @@ void rasterize_mesh(
         }
     }
 
-    // --- Smooth z-buffer visualization
+    // Smooth z-buffer visualization
     if (show_zbuffer)
     {
         for (int y = 0; y < height; ++y)
@@ -219,7 +227,7 @@ void rasterize_mesh(
             {
                 int   idx         = y * width + x;
                 float z           = zbuffer[idx];
-                float depth_color = 1.0f - (z + 1.0f) / 2.0f; // near = white, far = black
+                float depth_color = 1.0f - (z + 1.0f) / 2.0f;
                 depth_color       = glm::clamp(depth_color, 0.0f, 1.0f);
                 (*image)[idx]     = glm::vec3(depth_color);
             }
@@ -228,7 +236,7 @@ void rasterize_mesh(
 }
 
 int main(int argc, char** argv)
-{ 
+{
     // Create a GLFW window and an OpenGL context
     // The event dispatcher records incoming events for a window
     // (e.g. change of size or mouse cursor movement)
@@ -248,11 +256,10 @@ int main(int argc, char** argv)
     // The `camera` instance is only data representing a perspective camera ...
     cgtub::PerspectiveCamera camera(/*fov_y=*/45.f, /*aspect=*/1, /*z_near=*/1.f, /*z_far=*/4.5f);
 
-    // ... while the `camera_controller` controls the camera. 
+    // ... while the `camera_controller` controls the camera.
     // This means, it processes user events and modifies
     // the camera parameters (i.e., rotating the camera if the user drags the mouse).
     cgtub::TurntableCameraController camera_controller(canvas, camera);
-
 
     // The rendering interface for this exercise is the `ImageRenderer`,
     // which can only render a canvas-filling image ...
@@ -268,24 +275,27 @@ int main(int argc, char** argv)
 
     // For large screen resolutions, the canvas resolution can be very
     // high and low-performance hardware may struggle to generate
-    // the image data interactively. We therefore introduce the 
+    // the image data interactively. We therefore introduce the
     // `subsampling_rate` that reduces the number of pixels to generate.
     // If the `subsampling_rate` is 1, then `image` has as many pixels
     // as the canvas. If it is n, every pixel in `image` corresponds to
     // n^2 pixels on the canvas.
     int subsampling_rate = 4;
-    width  /= subsampling_rate;
+    width /= subsampling_rate;
     height /= subsampling_rate;
 
-    // The image data itself (i.e. color for each pixel) is simply an array of colors. 
+    // The image data itself (i.e. color for each pixel) is simply an array of colors.
     // For a pixel (x,y) the color is accessed as image[y*width + x].
     std::vector<glm::vec3> image(width * height, glm::vec3(0));
-    
+
     // Create the scene geometry (a coordinate system, a box and a sphere)...
     glm::vec3 axes_start_end[] = {
-        glm::vec3(0, 0, 0), glm::vec3(1, 0, 0),
-        glm::vec3(0, 0, 0), glm::vec3(0, 1, 0),
-        glm::vec3(0, 0, 0), glm::vec3(0, 0, 1),
+        glm::vec3(0, 0, 0),
+        glm::vec3(1, 0, 0),
+        glm::vec3(0, 0, 0),
+        glm::vec3(0, 1, 0),
+        glm::vec3(0, 0, 0),
+        glm::vec3(0, 0, 1),
     };
     glm::vec3 axes_colors[] = {
         glm::vec3(1, 0, 0),
@@ -360,18 +370,14 @@ int main(int argc, char** argv)
         for (size_t i = 0; i < sphere_vertices.size(); ++i)
             sphere_vertices_ndc[i] = view_projection_matrix * glm::vec4(sphere_vertices[i], 1.f);
 
-        
-
         // Fill the image with a dummy color (here, one could clear the image with a constant color)
         for (int y = 0; y < height; ++y)
         {
             for (int x = 0; x < width; ++x)
             {
-                image[y * width + x] = glm::vec3(0.0f); //ex3::generate_dummy_color(x, y, width, height)
+                image[y * width + x] = glm::vec3(0.0f); // ex3::generate_dummy_color(x, y, width, height)
             }
         }
-
-
 
         bool use_zbuffer  = use_z_buffer;
         bool show_zbuffer = show_z_buffer;
@@ -391,7 +397,8 @@ int main(int argc, char** argv)
             height,
             &image,
             zbuffer,
-            use_zbuffer);
+            use_zbuffer,
+            cull_behind);
         // Rasterize box and sphere
         rasterize_mesh(
             box_vertices_ndc,
@@ -421,8 +428,7 @@ int main(int argc, char** argv)
             cull_behind,
             cull_front);
 
-
-        // Display the generated image on the canvas 
+        // Display the generated image on the canvas
         // (don't need to clear the canvas because image fully fills it)
         renderer.render(image, width, height);
 
